@@ -148,7 +148,7 @@ jobs:
 
           tags: |
             ghcr.io/${{ steps.lower-repo.outputs.repository }}/ripley:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/baihu:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/ripley:latest
 
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
