@@ -1,23 +1,209 @@
-name: Schedule Test
+name: Build and Push Baihu Docker Image
 
 on:
-  push:
-
+  # 每天 03:00 UTC 自动检查上游镜像
   schedule:
-    - cron: "4-59/5 * * * *"
+    - cron: "9 19 * * *"
 
+  # 允许手动运行
   workflow_dispatch:
 
 jobs:
-  test:
+  build:
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: write
+      packages: write
+
     steps:
-      - name: Test trigger
+      # --------------------------------------------------
+      # 1. Checkout
+      # --------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      # --------------------------------------------------
+      # 2. 登录 GHCR
+      # --------------------------------------------------
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # --------------------------------------------------
+      # 3. 登录 Docker Hub
+      # --------------------------------------------------
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # --------------------------------------------------
+      # 4. 设置 Docker Buildx
+      # --------------------------------------------------
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # --------------------------------------------------
+      # 5. 获取当前上游 Baihu 镜像 digest
+      # --------------------------------------------------
+      - name: Check upstream Baihu image
+        id: check
+        shell: bash
         run: |
-          echo "================================"
-          echo "TRIGGER TEST"
-          echo "================================"
-          date -u
-          echo "event=${{ github.event_name }}"
-          echo "repository=${{ github.repository }}"
+          set -e
+
+          IMAGE="ghcr.io/engigu/baihu:latest"
+
+          echo "Checking upstream image: $IMAGE"
+
+          CURRENT_DIGEST="$(
+            docker buildx imagetools inspect "$IMAGE" \
+            | awk '/^Digest:/ {print $2; exit}'
+          )"
+
+          if [ -z "$CURRENT_DIGEST" ]; then
+            echo "ERROR: Failed to get image digest."
+            exit 1
+          fi
+
+          echo "Current digest: $CURRENT_DIGEST"
+
+          OLD_DIGEST=""
+
+          if [ -f .github/baihu-base-digest.txt ]; then
+            OLD_DIGEST="$(
+              sed -n 's/^DIGEST=//p' \
+              .github/baihu-base-digest.txt \
+              | head -n1
+            )"
+          fi
+
+          echo "Old digest: $OLD_DIGEST"
+
+          echo "digest=$CURRENT_DIGEST" >> "$GITHUB_OUTPUT"
+
+          if [ "$CURRENT_DIGEST" = "$OLD_DIGEST" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Upstream image has NOT changed."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Upstream image has CHANGED."
+          fi
+
+      # --------------------------------------------------
+      # 6. 获取上游 GitHub 最新 Release 版本
+      # --------------------------------------------------
+      - name: Get upstream Baihu version
+        id: version
+        if: steps.check.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+        shell: bash
+        run: |
+          set -e
+
+          VERSION="$(
+            curl -fsSL \
+              https://api.github.com/repos/engigu/baihu-panel/releases/latest \
+              | jq -r '.tag_name'
+          )"
+
+          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+            VERSION="unknown"
+          fi
+
+          echo "Upstream version: $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # --------------------------------------------------
+      # 7. 获取小写仓库名称
+      # --------------------------------------------------
+      - name: Set lowercase repository name
+        id: lower-repo
+        shell: bash
+        run: |
+          echo "repository=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      # --------------------------------------------------
+      # 8. 构建并推送
+      #
+      # schedule:
+      #   只有上游 digest 发生变化才构建
+      #
+      # workflow_dispatch:
+      #   手动运行时直接构建
+      # --------------------------------------------------
+      - name: Build and push Docker image
+        if: steps.check.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          pull: true
+          push: true
+
+          tags: |
+            ghcr.io/${{ steps.lower-repo.outputs.repository }}/angelina:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/angelina:latest
+
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.description=Baihu Docker Image
+            org.opencontainers.image.licenses=MIT
+
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # --------------------------------------------------
+      # 9. 更新 .txt
+      #
+      # 只有真正检测到上游 digest 变化时才更新。
+      #
+      # 手动构建自己的修改，但上游没变化：
+      # 不会产生无意义的 .txt commit。
+      # --------------------------------------------------
+      - name: Update upstream digest record
+        if: steps.check.outputs.changed == 'true'
+        shell: bash
+        env:
+          CURRENT_DIGEST: ${{ steps.check.outputs.digest }}
+          UPSTREAM_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -e
+
+          mkdir -p .github
+
+          cat > .github/baihu-base-digest.txt <<EOF
+          IMAGE=ghcr.io/engigu/baihu:latest
+          UPSTREAM_VERSION=$UPSTREAM_VERSION
+          DIGEST=$CURRENT_DIGEST
+          UPDATED_AT=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          EOF
+
+          echo "Updated .github/baihu-base-digest.txt:"
+          cat .github/baihu-base-digest.txt
+
+      # --------------------------------------------------
+      # 10. 把 .txt 提交回 GitHub
+      # --------------------------------------------------
+      - name: Commit digest record
+        if: steps.check.outputs.changed == 'true'
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -e
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add .github/baihu-base-digest.txt
+
+          git commit \
+            -m "chore: update Baihu upstream image digest"
+
+          git push origin "HEAD:${DEFAULT_BRANCH}"
