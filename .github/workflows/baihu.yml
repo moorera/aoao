@@ -3,7 +3,7 @@ name: Build and Push Baihu Docker Image
 on:
   # 每天 03:00 UTC 自动检查上游镜像
   schedule:
-    - cron: "55 7 * * *"
+    - cron: "50 8 * * *"
 
   # 允许手动运行
   workflow_dispatch:
@@ -147,8 +147,8 @@ jobs:
           push: true
 
           tags: |
-            ghcr.io/${{ steps.lower-repo.outputs.repository }}/ripley:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/ripley:latest
+            ghcr.io/${{ steps.lower-repo.outputs.repository }}/angelina:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/angelina:latest
 
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
