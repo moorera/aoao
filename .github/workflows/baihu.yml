@@ -3,7 +3,7 @@ name: Build and Push Baihu Docker Image
 on:
   # 每天 03:00 UTC 自动检查上游镜像
   schedule:
-    - cron: "0 3 * * *"
+    - cron: "55 7 * * *"
 
   # 允许手动运行
   workflow_dispatch:
